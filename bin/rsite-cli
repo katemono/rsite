@@ -1,0 +1,180 @@
+#!/usr/bin/env ruby
+
+require 'optparse'
+require 'rsite'
+require 'ruby-fcp'
+
+options = { index: 'index.html' }
+
+opts = OptionParser.new do |opts|
+  opts.banner = "Usage: #{$0} [options]"
+  
+  opts.on("-u", "--uri URI",
+    "USK@(requires insert uri, kinda the only reason to use this), SSK@(only use this for full directory uploads)") do |u|
+    options[:uri] = u
+  end
+  
+  opts.on("-o", "--request-uri URI",
+    "USK@(its the only sort that applies)") do |u|
+    options[:ouri] = u
+  end
+  opts.on("-p", "--path path",
+    "if this is directory make sure you specified -d option") do |p|
+    options[:path] = p
+  end
+  
+  opts.on("-i", "--index defaultfile",
+    "default file for directory uploads, I believe it defaults to index.html") do |i|
+    options[:index] = i
+  end
+  
+  opts.on("-h", "--server host:port",
+    "Must be a freenet client protocol server") do |s|
+    options[:server] = s
+  end
+  
+  opts.on("-f", "--full",
+    "Full insert, basically use ClientPutDirectory and no redirection from old editions, if this is your first time running rsite, you gotta do this. If your editions seemed fudged up this is also another good fixer for that.") do |s|
+    options[:full] = s
+  end
+  
+  opts.on("-g", "--gen sitename",
+    "Generates key pair for you") do |u|
+    options[:gen] = u
+  end
+  
+  opts.on("-t", "--two-part",
+    "Two part upload") do |s|
+    options[:two] = s
+  end
+  
+  opts.on("-r", "--first-run",
+    "alternative first run options") do |s|
+    options[:first] = s
+  end
+  
+  opts.on("-s", "--save",
+    "Save your current insert options for directory") do |s|
+    options[:save] = s
+  end
+  
+  opts.on("-v", "--fix-editions",
+    "fix the edition value") do |s|
+    options[:vr] = s
+  end
+  
+  opts.on('-e', "--edition value", "specify previous edition values") do |s|
+      options[:e] = s
+  end
+  
+  opts.on_tail("-h", "--help", "Show this message") do
+        puts opts
+        exit
+  end
+  
+end.parse!
+
+
+
+if options.has_key? :server
+  host, port = options[:server].chomp.lstrip.split(':')
+else
+  host, port = "127.0.0.1", 9481
+end
+
+client = FCPClient.new("rsite-#{SecureRandom.hex}", host, port)
+if options.has_key? :path
+  path = options[:path].chomp.lstrip
+else
+  path = Dir.pwd
+end
+
+if options.has_key? :gen
+  uris = client.new_ssk_pair().pop
+  name = options[:gen].chomp.lstrip
+  options[:uri] =  'U' + uris["InsertURI"][1..-1] + name + "/0/"
+  options[:ouri] =  'U' + uris["RequestURI"][1..-1] + name + "/0/"
+end 
+
+if File.directory? path
+  
+  rsite = RSUtils.new(path)
+  if options[:first]
+    rsite.firstrun = true
+  end
+  unless options.has_key? :uri
+    if File.exist? File.join(path,'.inserturi')
+      options[:uri] = YAML::load(File.read( File.join path, '.inserturi'))
+    end
+    if File.exist? File.join(path,'.uri')
+      options[:ouri] = YAML::load(File.read( File.join path, '.uri'))
+    end
+  end
+  
+  if options.has_key? :save
+    if options.has_key? :uri and options.has_key? :ouri
+      rsite.save_uris(options[:uri].chomp.lstrip, options[:ouri].chomp.lstrip)
+    else 
+      puts "I have no idea what you are trying to save..."
+      exit
+    end
+  end
+  
+  if options.has_key? :uri
+    uri = options[:uri].chomp.lstrip
+  
+    if options.has_key? [:e]
+      puts "Applying previous edition value specified"
+      rsite.version = options[:e].to_i
+    end
+    
+    if options[:vr]
+      if options.has_key? :ouri
+        rsite.version = client.usks_latest(options[:ouri].chomp.lstrip)
+        rsite.directory_hash
+        rsite.serialize
+      else
+        puts "You need a request uri either in .uri of this path or specified by option -o"
+      end
+    end
+    if options[:two]
+      (rsite.twopart_upload).each do |x|
+        rsite.current[x] = client.simple_put('CHK@',rsite.current[x]).pop['URI']
+      end
+    end
+    if options[:full]
+      response = client.simple_dir_put(uri, path, {"DefaultName" => options[:index]}).pop
+    elsif options.has_key? :ouri
+      filez = rsite.format_file_list(rsite.update,options[:ouri].chomp.lstrip)
+      if filez.size == 0
+        puts "Nothing to do no new files"
+        client.close
+        exit
+      else
+       response = client.put_complex_dir(uri, filez, true, { "ClientToken" => SecureRandom.hex, "Persistence" => 'forever', "DefaultName" => options[:index], "Verbosity" => 1111111}).pop
+      end
+    else
+      puts "Complex directory's require a request URI to determine past editions you could go ahead and perform a full upload with the -f option"
+      client.close
+      exit
+    end
+  
+    if response[:head].include? "PutFailed" or response[:head].include? "ProtocolError"
+      puts "Failed somewhere along the way"
+      client.close
+    else
+      rsite.clear_current
+      rsite.version = response["URI"].split('/')[-1].to_i
+      rsite.directory_hash
+      rsite.serialize
+      client.close
+    end
+  end
+  
+else
+  puts "I am guessing this is your first run, or your path is incorrect. Well to go ahead and initialize a directory for use do:"  
+  puts "$#{$0} -p path_to_site -u insert-uri-of-site -o request-uri-of-site -s -f"
+  puts "or: $#{$0} -p path_to_site -g"
+  puts "-h for more options"
+  exit
+end
